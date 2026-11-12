@@ -31,7 +31,14 @@ fn in_netns(stdin: &str, args: &[&str]) -> Option<(bool, String)> {
 
 fn ruleset() -> Ruleset {
     let local: Ipv4Addr = [10, 244, 1, 2].into();
-    let mut r = Ruleset::default();
+    let mut r = Ruleset {
+        pod_ranges: vec![Range {
+            start: u32::from(Ipv4Addr::new(10, 244, 1, 0)),
+            end: u32::from(Ipv4Addr::new(10, 244, 1, 255)),
+        }],
+        ..Default::default()
+    };
+    r.known.insert(local);
     r.ingress_isolated.insert(local);
     r.egress_isolated.insert(local);
     for (peer, ports) in [

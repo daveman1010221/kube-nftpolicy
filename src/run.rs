@@ -26,6 +26,8 @@ const SETTLE: Duration = Duration::from_millis(200);
 
 pub struct Options {
     pub node: String,
+    /// The node's pod address ranges: within them, an address no known pod has passes nowhere.
+    pub pod_ranges: Vec<crate::ranges::Range>,
     pub table: String,
     pub nft: String,
     /// Apply once the watches are in step, then exit.
@@ -70,7 +72,7 @@ pub async fn run(client: Client, opts: Options) -> anyhow::Result<()> {
             pods.state().iter().map(|o| o.as_ref()),
             policies.state().iter().map(|o| o.as_ref()),
         );
-        let rules = compile::compile(&cluster, &opts.node);
+        let rules = compile::compile(&cluster, &opts.node, &opts.pod_ranges);
         let script = nft::script(&opts.table, &rules);
         if last.as_deref() != Some(script.as_str()) {
             match apply(&opts.nft, &script).await {

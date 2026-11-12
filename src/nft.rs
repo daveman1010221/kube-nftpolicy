@@ -5,8 +5,9 @@
 //!
 //! The table's chains:
 //! - `forward`, for traffic routed through the node: from a local pod, to a local pod, or both. Replies to an allowed
-//!   connection pass first; an isolated source then goes through `egress`, an isolated destination through `ingress`.
-//! - `input`, for a local pod's traffic to the node's own addresses: egress only, since the node is no pod.
+//!   connection pass first; an address in the node's pod ranges that is no known pod is dropped (a pod the enforcer
+//!   has not yet seen); an isolated source then goes through `egress`, an isolated destination through `ingress`.
+//! - `input`, for a local pod's traffic to the node's own addresses: the same, egress only, since the node is no pod.
 //! - `egress` and `ingress` return when an element allows the packet, and drop it otherwise.
 //!
 //! Traffic the node itself sends to its pods (the kubelet's probes) goes through neither chain, as NetworkPolicy
@@ -29,6 +30,9 @@ pub fn script(table: &str, rules: &Ruleset) -> String {
     let _ = writeln!(s, "add table ip {table}");
     let _ = writeln!(s, "delete table ip {table}");
     let _ = writeln!(s, "table ip {table} {{");
+    let ranges: Vec<String> = rules.pod_ranges.iter().map(|r| range(*r)).collect();
+    set(&mut s, "pod_ranges", "ipv4_addr", true, &ranges);
+    addr_set(&mut s, "known_pods", rules.known.iter());
     addr_set(&mut s, "ingress_isolated", rules.ingress_isolated.iter());
     addr_set(&mut s, "egress_isolated", rules.egress_isolated.iter());
     any_set(&mut s, "ingress_any", &ingress_any);
@@ -44,12 +48,15 @@ const CHAINS: &str = "\
 \tchain forward {
 \t\ttype filter hook forward priority filter; policy accept;
 \t\tct state established,related accept
+\t\tip saddr @pod_ranges ip saddr != @known_pods counter drop
+\t\tip daddr @pod_ranges ip daddr != @known_pods counter drop
 \t\tip saddr @egress_isolated jump egress
 \t\tip daddr @ingress_isolated jump ingress
 \t}
 \tchain input {
 \t\ttype filter hook input priority filter; policy accept;
 \t\tct state established,related accept
+\t\tip saddr @pod_ranges ip saddr != @known_pods counter drop
 \t\tip saddr @egress_isolated jump egress
 \t}
 \tchain egress {

@@ -162,7 +162,8 @@ fn protocol(p: Option<&str>) -> Option<Protocol> {
     }
 }
 
-fn cidr(s: &str) -> Option<Cidr> {
+/// An IPv4 CIDR, or `None` for anything else.
+pub fn cidr(s: &str) -> Option<Cidr> {
     let (addr, prefix) = s.split_once('/')?;
     let prefix: u8 = prefix.parse().ok()?;
     (prefix <= 32).then_some(Cidr {

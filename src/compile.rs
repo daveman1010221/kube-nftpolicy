@@ -3,6 +3,11 @@
 //!
 //! A node enforces only for its own pods: egress where the traffic starts, ingress where it ends. Traffic between two
 //! nodes is checked once at each end, and between two pods of one node, both checks happen on that node.
+//!
+//! A pod starts before the API reports its address, so before the enforcer can know what policy applies to it.
+//! Kubernetes requires a pod that an existing policy selects to be isolated before it starts. So, within the node's
+//! pod ranges, an address that is no pod the enforcer knows is refused both ways, until the enforcer learns the pod and
+//! writes its rules with its address, in one transaction.
 
 use crate::model::{Cluster, Peer, Pod, PortRef, PortSpec, Protocol, Rule};
 use crate::ranges::{Range, block_ranges};
@@ -33,6 +38,10 @@ pub struct Allow {
 /// One node's rules. Sets, so that the result is the same whatever order the cluster's objects came in.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ruleset {
+    /// The node's pod address ranges.
+    pub pod_ranges: Vec<Range>,
+    /// The node's pods' addresses: within `pod_ranges`, the only ones that pass at all.
+    pub known: BTreeSet<Ipv4Addr>,
     pub ingress_isolated: BTreeSet<Ipv4Addr>,
     pub egress_isolated: BTreeSet<Ipv4Addr>,
     pub ingress: BTreeSet<Allow>,
@@ -49,9 +58,15 @@ pub struct Packet {
 }
 
 impl Ruleset {
-    /// What the node's nftables table decides for a new connection, as `crate::nft` writes it: an isolated source
-    /// needs an egress entry, an isolated destination an ingress entry.
+    /// What the node's nftables table decides for a new connection, as `crate::nft` writes it: an address in the
+    /// node's pod ranges that is no known pod passes nowhere; an isolated source needs an egress entry, an isolated
+    /// destination an ingress entry.
     pub fn allows(&self, p: &Packet) -> bool {
+        let unknown =
+            |a: Ipv4Addr| self.pod_ranges.iter().any(|r| r.contains(a)) && !self.known.contains(&a);
+        if unknown(p.src) || unknown(p.dst) {
+            return false;
+        }
         let ok = |entries: &BTreeSet<Allow>, local: Ipv4Addr, peer: Ipv4Addr| {
             entries
                 .iter()
@@ -73,15 +88,28 @@ fn ports_admit(ports: Ports, p: &Packet) -> bool {
     }
 }
 
-/// The rules for `node`.
-pub fn compile(cluster: &Cluster, node: &str) -> Ruleset {
-    let mut out = Ruleset::default();
+/// The rules for `node`, whose pods get their addresses from `pod_ranges`.
+pub fn compile(cluster: &Cluster, node: &str, pod_ranges: &[Range]) -> Ruleset {
+    let mut out = Ruleset {
+        pod_ranges: pod_ranges.to_vec(),
+        ..Default::default()
+    };
+    // Joined where they overlap or touch: an interval set takes no overlapping elements.
+    out.pod_ranges.sort();
+    out.pod_ranges.dedup_by(|next, prev| {
+        let joins = u64::from(next.start) <= u64::from(prev.end) + 1;
+        if joins {
+            prev.end = prev.end.max(next.end);
+        }
+        joins
+    });
     let local = cluster
         .pods
         .iter()
         .filter(|p| p.is_addressable() && p.node.as_deref() == Some(node));
     for pod in local {
         let ip = pod.ip.expect("addressable");
+        out.known.insert(ip);
         for policy in cluster
             .policies
             .iter()
@@ -361,8 +389,8 @@ mod tests {
     #[test]
     fn the_builds_policy_reaches_the_registry_and_nothing_else() {
         let c = cluster(vec![builds_policy()]);
-        let a = compile(&c, "a");
-        let b = compile(&c, "b");
+        let a = compile(&c, "a", &[]);
+        let b = compile(&c, "b", &[]);
         let both = |p: &Packet| a.allows(p) && b.allows(p);
         assert!(both(&pkt([10, 244, 1, 2], [10, 244, 2, 2], 8080)));
         assert!(!both(&pkt([10, 244, 1, 2], [10, 244, 2, 2], 22)));
@@ -381,7 +409,7 @@ mod tests {
     #[test]
     fn a_node_holds_only_its_own_pods() {
         let c = cluster(vec![builds_policy()]);
-        let b = compile(&c, "b");
+        let b = compile(&c, "b", &[]);
         assert!(b.ingress_isolated.is_empty() && b.egress_isolated.is_empty());
         assert!(b.ingress.is_empty() && b.egress.is_empty());
     }
@@ -402,7 +430,7 @@ mod tests {
             })],
             ports: vec![],
         }]);
-        let a = compile(&cluster(vec![p]), "a");
+        let a = compile(&cluster(vec![p]), "a", &[]);
         assert!(a.allows(&pkt([10, 244, 1, 2], [1, 1, 1, 1], 443)));
         assert!(!a.allows(&pkt([10, 244, 1, 2], [10, 244, 2, 2], 8080)));
     }
@@ -411,9 +439,46 @@ mod tests {
     fn a_policy_naming_only_ingress_leaves_egress_open() {
         let mut p = builds_policy();
         p.egress = None;
-        let a = compile(&cluster(vec![p]), "a");
+        let a = compile(&cluster(vec![p]), "a", &[]);
         assert!(a.allows(&pkt([10, 244, 1, 2], [1, 1, 1, 1], 443)));
         assert!(!a.allows(&pkt([1, 1, 1, 1], [10, 244, 1, 2], 443)));
+    }
+
+    #[test]
+    fn a_pod_not_yet_seen_passes_nowhere_until_it_is() {
+        let c = cluster(vec![]);
+        let range = Range {
+            start: u32::from(Ipv4Addr::new(10, 244, 1, 0)),
+            end: u32::from(Ipv4Addr::new(10, 244, 1, 255)),
+        };
+        let a = compile(&c, "a", &[range]);
+        assert!(
+            a.allows(&pkt([10, 244, 1, 2], [1, 1, 1, 1], 443)),
+            "a known pod, no policy"
+        );
+        assert!(
+            !a.allows(&pkt([10, 244, 1, 9], [1, 1, 1, 1], 443)),
+            "an address no pod has yet"
+        );
+        assert!(
+            !a.allows(&pkt([10, 244, 2, 2], [10, 244, 1, 9], 8080)),
+            "to it either"
+        );
+        assert!(
+            a.allows(&pkt([10, 244, 2, 2], [10, 244, 2, 9], 8080)),
+            "another node's range is that node's"
+        );
+    }
+
+    #[test]
+    fn pod_ranges_are_joined_where_they_overlap_or_touch() {
+        let r = |s: u32, e: u32| Range { start: s, end: e };
+        let a = compile(
+            &cluster(vec![]),
+            "a",
+            &[r(10, 20), r(0, 5), r(21, 30), r(15, 25), r(40, 50)],
+        );
+        assert_eq!(a.pod_ranges, vec![r(0, 5), r(10, 30), r(40, 50)]);
     }
 
     #[test]
@@ -422,6 +487,6 @@ mod tests {
         for p in &mut c.pods {
             p.host_network = true;
         }
-        assert_eq!(compile(&c, "a"), Ruleset::default());
+        assert_eq!(compile(&c, "a", &[]), Ruleset::default());
     }
 }

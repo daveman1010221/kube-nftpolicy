@@ -36,6 +36,7 @@ is dropped, so it allows nothing, rather than read as "every port" or "every pee
 
 Each node runs one instance. It watches pods, namespaces and NetworkPolicies, and for its own pods computes:
 
+- its pods' addresses, within its pod ranges: an address there that is no known pod passes nowhere;
 - which are isolated for ingress, and which for egress;
 - what each may exchange: (pod address, peer address range, protocol, ports).
 
@@ -53,12 +54,22 @@ of every node, together, decide every generated packet as it does.
 **As a node service**, with a kubeconfig whose user the ClusterRole in `deploy/rbac.yaml` binds
 (`system:kube-nftpolicy`):
 
-    kube-nftpolicy --node-name "$NODE_NAME" --kubeconfig /etc/kubernetes/kube-nftpolicy.conf
+    kube-nftpolicy --node-name "$NODE_NAME" --pod-cidr "$POD_CIDR" --kubeconfig /etc/kubernetes/kube-nftpolicy.conf
 
 **As a DaemonSet**, on any cluster: build the image (`nix build .#image`), load or push it where your nodes can pull it,
 then `kubectl apply -f deploy/`.
 
 `--print` shows the script a node would apply without applying it; `--once` applies it and exits.
+
+## Uninstalling
+
+The table outlives the process on purpose: when the enforcer crashes or restarts for an upgrade, the last rules stay
+in force rather than the node falling open. So uninstalling has one step more. Stop the enforcer, then remove its
+table on every node with `kube-nftpolicy --remove` (or `nft delete table ip kube_nftpolicy`). A table left behind keeps
+enforcing a stale picture of the cluster, and refuses every new pod in the node's pod ranges.
+
+With the DaemonSet: `kubectl delete -f deploy/daemonset.yaml`, then on each node run `kube-nftpolicy --remove` with
+the node's network and `NET_ADMIN`, for example from a short-lived pod with `hostNetwork: true` and the same image.
 
 ## Requirements and limits
 
@@ -67,6 +78,10 @@ then `kubectl apply -f deploy/`.
   node loads `br_netfilter`.
 - **IPv4 only.** On a dual-stack cluster, pods' IPv6 traffic is not enforced; it warns at start when pods have IPv6
   addresses.
+- **A new pod is isolated before the API reports it** only when the enforcer knows the node's pod ranges
+  (`--pod-cidr`, or the node's `spec.podCIDRs`). Within them, an address that is no pod it knows is refused both ways
+  until the enforcer has seen the pod, so every new pod, policy or not, starts with no network for a moment (under a
+  second on a small cluster). Without the ranges, a new pod runs unenforced for that moment, and it warns at start.
 - **Until it has written its first table, nothing is enforced**, as with other engines. Check enforcement from inside
   the cluster, with a pod that must and must not reach things.
 - **A connection already open stays open** when a policy changes to forbid it; new connections follow the new policy.

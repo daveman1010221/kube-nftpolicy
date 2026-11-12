@@ -1,5 +1,5 @@
-# What kube-nftpolicy reads: pods, namespaces and NetworkPolicies, cluster-wide, and nothing else. It writes nothing
-# through the API.
+# What kube-nftpolicy reads: pods, namespaces and NetworkPolicies, cluster-wide, and a node's pod ranges when it is
+# not given them; nothing else. It writes nothing through the API.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -8,6 +8,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "namespaces"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch"]

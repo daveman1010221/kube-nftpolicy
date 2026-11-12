@@ -223,7 +223,7 @@ proptest! {
 
     #[test]
     fn the_nodes_rules_decide_as_networkpolicy_means(c in cluster(), packets in prop::collection::vec(packet(), 1..20)) {
-        let rules: Vec<_> = NODES.iter().map(|n| compile(&c, n)).collect();
+        let rules: Vec<_> = NODES.iter().map(|n| compile(&c, n, &[])).collect();
         for p in &packets {
             let by_rules = rules.iter().all(|r| r.allows(p));
             prop_assert_eq!(by_rules, spec::allows(&c, p), "packet {:?}", p);
@@ -246,7 +246,25 @@ proptest! {
         shuffled.policies = shuffle(c.policies.len()).into_iter().map(|i| c.policies[i].clone()).collect();
         shuffled.namespaces = shuffle(c.namespaces.len()).into_iter().map(|i| c.namespaces[i].clone()).collect();
         for n in NODES {
-            prop_assert_eq!(compile(&c, n), compile(&shuffled, n));
+            prop_assert_eq!(compile(&c, n, &[]), compile(&shuffled, n, &[]));
+        }
+    }
+
+    /// A node's pod range changes no verdict on a pod it knows, and refuses every address in it that no local pod has.
+    #[test]
+    fn a_pod_range_refuses_the_unknown_and_nothing_else(c in cluster(), packets in prop::collection::vec(packet(), 1..20), prefix in 25u8..=32) {
+        let range = {
+            let (start, end) = Cidr { addr: Ipv4Addr::new(10, 0, 0, 0), prefix }.bounds();
+            Range { start, end }
+        };
+        for n in NODES {
+            let plain = compile(&c, n, &[]);
+            let ranged = compile(&c, n, &[range]);
+            let known = |a: Ipv4Addr| c.pods.iter().any(|p| p.is_addressable() && p.ip == Some(a) && p.node.as_deref() == Some(n));
+            let unknown = |a: Ipv4Addr| range.contains(a) && !known(a);
+            for p in &packets {
+                prop_assert_eq!(ranged.allows(p), plain.allows(p) && !unknown(p.src) && !unknown(p.dst), "node {} packet {:?}", n, p);
+            }
         }
     }
 
