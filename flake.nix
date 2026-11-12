@@ -21,8 +21,11 @@
           nativeBuildInputs = [ pkgs.makeWrapper ];
           # The kernel test applies the script in a network namespace of its own; the build sandbox has no `unshare`,
           # and the test says it skipped.
+          # The manifests go with it, for a node image or a cluster to apply: share/kube-nftpolicy/rbac.yaml is what a
+          # node service needs (its user's read access), daemonset.yaml the DaemonSet's.
           postInstall = ''
             wrapProgram $out/bin/kube-nftpolicy --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.nftables ]}
+            install -Dm644 -t $out/share/kube-nftpolicy deploy/rbac.yaml deploy/daemonset.yaml
           '';
           meta = {
             description = "Kubernetes NetworkPolicy enforced in nftables, IPv4 only";
