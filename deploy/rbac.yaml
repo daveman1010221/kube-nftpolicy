@@ -1,0 +1,38 @@
+# What kube-nftpolicy reads: pods, namespaces and NetworkPolicies, cluster-wide, and nothing else. It writes nothing
+# through the API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-nftpolicy
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch"]
+---
+# For the DaemonSet (daemonset.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-nftpolicy
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-nftpolicy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-nftpolicy
+subjects:
+  - kind: ServiceAccount
+    name: kube-nftpolicy
+    namespace: kube-system
+  # A node service that reaches the API with its own client certificate (CN=system:kube-nftpolicy), as nix-usernetes
+  # runs it.
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: system:kube-nftpolicy

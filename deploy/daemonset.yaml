@@ -1,0 +1,38 @@
+# kube-nftpolicy on every node, for a cluster whose nodes do not run it as a service of their own. It needs the node's
+# network and the one capability to change its nftables tables. Load the image from `nix build .#image`, or push it to a
+# registry the nodes pull from, and set `image` below to match.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-nftpolicy
+  namespace: kube-system
+  labels: { app.kubernetes.io/name: kube-nftpolicy }
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: kube-nftpolicy }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: kube-nftpolicy }
+    spec:
+      serviceAccountName: kube-nftpolicy
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      # Every node, whatever its taints.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: kube-nftpolicy
+          image: kube-nftpolicy:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_ADMIN"]
+            seccompProfile: { type: RuntimeDefault }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
